@@ -1,0 +1,7 @@
+{
+  "http.server.port": 8080,
+  "http.client": {
+    "defaultHost": "irtaxi.ru",
+    "defaultPort": 80
+  }
+}

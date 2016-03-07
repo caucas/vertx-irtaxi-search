@@ -1,5 +1,6 @@
 package cc.caucas.search;
 
+import io.vertx.core.DeploymentOptions;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.json.JsonObject;
 import io.vertx.rxjava.core.AbstractVerticle;
@@ -27,7 +28,12 @@ public class Server extends AbstractVerticle {
 
     public static void main(String... args) {
         Vertx vertx = Vertx.vertx();
-        vertx.deployVerticle(Server.class.getName());
+        vertx.fileSystem()
+                .readFileObservable("src/main/resources/application-config.json")
+                .flatMap(data -> Observable.just(Buffer.buffer()).mergeWith(Observable.just(data)))
+                .reduce(Buffer::appendBuffer)
+                .subscribe(config -> vertx.deployVerticle(Server.class.getName(),
+                        new DeploymentOptions().setConfig(config.toJsonObject())));
     }
 
     @Override
@@ -49,44 +55,40 @@ public class Server extends AbstractVerticle {
                                 );
                     }
                 });
-        server.listen(8080);
+        server.listen(config().getInteger("http.server.port"));
     }
 
     private void onSearch(Message<Object> message) {
         String searchKey = (String) message.body();
         findInLocalCache(searchKey).concatWith(findInNetwork(searchKey))
                 .first()
-                .subscribe(data -> message.reply(data));
+                .subscribe(message::reply);
     }
 
     private Observable<JsonObject> findInNetwork(String key) {
         HttpClient client = vertx.createHttpClient(
-                new HttpClientOptions()
-                        .setDefaultHost("irtaxi.ru")
-                        .setDefaultPort(80));
-        HttpClientRequest request = null;
+                new HttpClientOptions(config().getJsonObject("http.client")));
+
+        HttpClientRequest request;
         try {
             request = client
                     .get("/taxi/public/search?pattern=" + URLEncoder.encode(key, "UTF-8"));
         } catch (UnsupportedEncodingException e) {
-            e.printStackTrace();
+            throw new RuntimeException("Can't encode URL", e);
         }
 
         PublishSubject<JsonObject> subject = PublishSubject.create();
         request.toObservable()
-                .subscribe(response -> {
-                    response.toObservable()
-                            .reduce(Buffer.buffer(), (a, b) -> Buffer.buffer(a.toString().concat(b.toString())))
-                            .asObservable()
-                            .doOnNext(o -> {
-                                JsonObject jsonObject = o.toJsonObject();
-                                cache.put(key, jsonObject);
-                                subject.onNext(jsonObject);
-                            })
-                            .doOnCompleted(subject::onCompleted)
-                            .doOnError(subject::onError)
-                            .subscribe();
-                });
+                .flatMap(response -> Observable.just(Buffer.buffer()).mergeWith(response.toObservable()))
+                .reduce(Buffer::appendBuffer)
+                .doOnNext(o -> {
+                    JsonObject jsonObject = o.toJsonObject();
+                    cache.put(key, jsonObject);
+                    subject.onNext(jsonObject);
+                })
+                .doOnCompleted(subject::onCompleted)
+                .doOnError(subject::onError)
+                .subscribe();
 
         request.end();
 
